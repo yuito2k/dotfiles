@@ -5,6 +5,8 @@
 return {
   {
     'yuito2k/vault.nvim',
+    -- Automatically handles lsqlite3 via luarocks integration
+    dependencies = { "kkharji/sqlite.lua" },
     config = function()
       require('vault')
     end,

@@ -27,6 +27,7 @@ local state = {
   open_nodes = { ['MyLocalDB'] = true, ['Tables'] = true, ['users'] = true }, -- Track state
   is_connected = false,
   db_type = nil,
+  db_types = { 'SQLite', 'PostgreSQL', 'MySQL', 'OracleDB', 'MongoDB', 'MariaDB' },
   icons = {
     db = '⌘',
     folder_open = '',
@@ -66,6 +67,23 @@ local sql_keywords = {
   'HAVING',
 }
 
+local function generate_id()
+  -- Get current time in seconds since the epoch as a number (float in standard Lua)
+  local timestamp = os.time() --
+
+  -- Multiply by 1e7 (10,000,000) and convert to an integer
+  -- Lua performs floating point arithmetic, so we use math.floor to get an integer value
+  local scaled_time_int = math.floor(timestamp * 1e7)
+
+  -- Format the integer as a hexadecimal string
+  local hex_string = string.format('%x', scaled_time_int)
+
+  -- The Python [2:] slice removes the "0x" prefix.
+  -- Lua's string.format("%x", ...) does not add a prefix, so slicing is not needed.
+
+  return hex_string
+end
+
 -- 1. Setup Highlight Groups
 local function setup_highlight_groups()
   api.nvim_set_hl(0, state.hl_active_border, { fg = '#8BE9FD' })
@@ -86,9 +104,9 @@ local function setup_highlight_groups()
   api.nvim_set_hl(0, 'ExplorerLineActive', { fg = '#F1FA8C', bg = '#44475A', bold = true }) -- Active line text color
   api.nvim_set_hl(0, 'ExplorerLineInactive', { fg = '#BD93F9', bg = 'NONE' }) -- Inactive line text color
   -- Define soft red for labels
-  api.nvim_set_hl(0, "SoftRedLabel", { fg = "#e06c75" }) 
+  api.nvim_set_hl(0, 'SoftRedLabel', { fg = '#e06c75' })
   -- Define soft orange for keys/actions
-  api.nvim_set_hl(0, "SoftOrangeKey", { fg = "#d19a66" })
+  api.nvim_set_hl(0, 'SoftOrangeKey', { fg = '#d19a66' })
 end
 
 -- 2. Autocomplete Engine Logic
@@ -234,6 +252,7 @@ local function render_results_table(buf, data)
     table.insert(row_lines, line)
   end
 
+  api.nvim_buf_set_option(buf, 'buftype', 'nofile')
   api.nvim_buf_set_option(buf, 'modifiable', true)
   api.nvim_buf_set_lines(buf, 0, -1, false, { header_str })
   api.nvim_buf_set_lines(buf, 1, -1, false, row_lines)
@@ -257,6 +276,7 @@ end
 
 local function render_explorer_tree(buf)
   local lines = {}
+  api.nvim_buf_set_option(buf, 'buftype', 'nofile')
   api.nvim_buf_set_option(buf, 'modifiable', true)
 
   local function add_line(text, level, is_open, node_id)
@@ -268,8 +288,20 @@ local function render_explorer_tree(buf)
       icon = state.icons.field -- Or state.icons.table if you want a different icon
     end
 
+    for _, word in ipairs(state.db_types) do
+      local s, e = text:find(word)
+      if s then
+        table.insert(lines, indent .. icon .. ' ' .. text .. ' --ID:' .. (generate_id() or ''))
+        return
+      else
+        table.insert(lines, indent .. icon .. ' ' .. text)
+        return
+      end
+    end
+
     -- Store the node_id in the line for later extraction by toggle_node/switch_to_win
-    table.insert(lines, indent .. icon .. ' ' .. text .. ' --ID:' .. (node_id or ''))
+    --table.insert(lines, indent .. icon .. ' ' .. text .. ' --ID:' .. (node_id or ''))
+    --table.insert(lines, indent .. icon .. ' ' .. text)
   end
 
   -- THE STATIC DATA MODEL
@@ -281,7 +313,9 @@ local function render_explorer_tree(buf)
     ['Triggers'] = { name = 'Triggers', type = 'folder', children = {} },
     ['users'] = { name = 'users', type = 'table', children = { 'name TEXT', 'email TEXT', 'joined_at INTEGER' } },
     -- ADDED KEYS AND COMMAS BELOW = {name = 'name TEXT', type = 'field'}, = {name = 'email TEXT', type = 'field'},
-    ['joined_at INTEGER'] = { name = 'joined_at INTEGER', type = 'field' },
+    ['name'] = { name = 'name TEXT', type = 'field' },
+    ['email'] = { name = 'email TEXT', type = 'field' },
+    ['joined_at'] = { name = 'joined_at INTEGER', type = 'field' },
   }
 
   -- THE RECURSIVE DRAW LOGIC
@@ -328,16 +362,39 @@ local function render_explorer_tree(buf)
   api.nvim_buf_set_option(buf, 'modifiable', false)
 end
 
+-- Add a function you can call externally when a connection is made
+-- M.connect_db = function ()
+local connect_db = function(ovr_buf)
+  -- Set default open states
+  state.open_nodes = { ['MyLocalDB'] = true, ['Tables'] = false, ['Views'] = false, ['Indexes'] = false, ['Triggers'] = false }
+  -- (You would also fetch real schema data here)
+  render_explorer_tree(ovr_buf)
+end
+
 -- Update your M.toggle_node function definition elsewhere in your script
 M.toggle_node = function()
   local win = api.nvim_get_current_win()
   local buf = api.nvim_win_get_buf(win)
+
   api.nvim_buf_set_option(buf, 'modifiable', true)
   local cursor_row = api.nvim_win_get_cursor(win)[1]
   local line = api.nvim_buf_get_lines(buf, cursor_row - 1, cursor_row, false)[1]
 
   -- Use a pattern match to reliably extract the hidden ID suffix:
-  local node_id = line:match '--ID:(%w+)'
+  --local node_id = line:match '--ID:(%w+)' -- TODO: important line for later usage
+  local node_id = line:match '(%w+)'
+  local db_type = line:match '%[([^%]]+)%]'
+
+  for _, word in ipairs(state.db_types) do
+    if state.is_connected == false then
+      if db_type == word then
+        connect_db(buf)
+        return
+      end
+    elseif state.is_connected == true then
+      break
+    end
+  end
 
   if node_id and state.open_nodes[node_id] ~= nil then
     state.open_nodes[node_id] = not state.open_nodes[node_id]
@@ -520,24 +577,23 @@ local function update_ui_state()
 
         -- 1. Get window width
         local win_width = api.nvim_win_get_width(b_win) - 2
-    
+
         -- 2. Your existing text
-        local left_text = "Connect: <enter> | New: n | Edit: e | Delete: d | Refresh: f | Close: <esc> (in normal mode)"
-        local right_text = "Help: ? | Leader: <space>"
-    
+        local left_text = 'Connect: <enter> | New: n | Edit: e | Delete: d | Refresh: f | Close: <esc> (in normal mode)'
+        local right_text = 'Help: ? | Leader: <space>'
+
         -- 3. Calculate spaces needed
         -- We subtract 1 or 2 to account for the sign column/edge
         local space_count = win_width - #left_text - #right_text - 1
-    
-        if space_count > 0 then
-            local full_line = left_text .. string.rep(" ", space_count) .. right_text
-            -- 4. Set the line
-            api.nvim_buf_set_lines(b_buf, 1, 2, false, { full_line })
-        else
-            -- If window is too small, just put one space
-            api.nvim_buf_set_lines(b_buf, 1, 2, false, { left_text .. " " .. right_text })
-        end
 
+        if space_count > 0 then
+          local full_line = left_text .. string.rep(' ', space_count) .. right_text
+          -- 4. Set the line
+          api.nvim_buf_set_lines(b_buf, 1, 2, false, { full_line })
+        else
+          -- If window is too small, just put one space
+          api.nvim_buf_set_lines(b_buf, 1, 2, false, { left_text .. ' ' .. right_text })
+        end
       end
     else
       api.nvim_buf_add_highlight(ovr_buf, state.overlay_ns, state.hl_first_line_text, 0, 4, -1) -- comment this line if you want to dimm the text when inactive
@@ -562,22 +618,22 @@ local function update_ui_state()
 
         -- 1. Get window width
         local win_width = api.nvim_win_get_width(b_win) - 2
-    
+
         -- 2. Your existing text
-        local left_text = "Insert Mode: i | Normal Mode: <esc> | Execute: <enter> | History: h | Close: <esc> (in normal mode)"
-        local right_text = "Help: ? | Leader: <space>"
-    
+        local left_text = 'Insert Mode: i | Normal Mode: <esc> | Execute: <enter> | History: h | Close: <esc> (in normal mode)'
+        local right_text = 'Help: ? | Leader: <space>'
+
         -- 3. Calculate spaces needed
         -- We subtract 1 or 2 to account for the sign column/edge
         local space_count = win_width - #left_text - #right_text - 1
-    
+
         if space_count > 0 then
-            local full_line = left_text .. string.rep(" ", space_count) .. right_text
-            -- 4. Set the line
-            api.nvim_buf_set_lines(b_buf, 1, 2, false, { full_line })
+          local full_line = left_text .. string.rep(' ', space_count) .. right_text
+          -- 4. Set the line
+          api.nvim_buf_set_lines(b_buf, 1, 2, false, { full_line })
         else
-            -- If window is too small, just put one space
-            api.nvim_buf_set_lines(b_buf, 1, 2, false, { left_text .. " " .. right_text })
+          -- If window is too small, just put one space
+          api.nvim_buf_set_lines(b_buf, 1, 2, false, { left_text .. ' ' .. right_text })
         end
 
         api.nvim_buf_add_highlight(b_buf, -1, (is_insert and state.hl_mode_insert or state.hl_mode_normal), 0, 0, #mode_text)
@@ -603,28 +659,33 @@ local function update_ui_state()
 
         -- 1. Get window width
         local win_width = api.nvim_win_get_width(b_win) - 2
-    
+
         -- 2. Your existing text
-        local left_text = "Close: <esc> (in normal mode)"
-        local right_text = "Help: ? | Leader: <space>"
-    
+        local left_text = 'Close: <esc> (in normal mode)'
+        local right_text = 'Help: ? | Leader: <space>'
+
         -- 3. Calculate spaces needed
         -- We subtract 1 or 2 to account for the sign column/edge
         local space_count = win_width - #left_text - #right_text - 1
-    
+
         if space_count > 0 then
-            local full_line = left_text .. string.rep(" ", space_count) .. right_text
-            -- 4. Set the line
-            api.nvim_buf_set_lines(b_buf, 1, 2, false, { full_line })
+          local full_line = left_text .. string.rep(' ', space_count) .. right_text
+          -- 4. Set the line
+          api.nvim_buf_set_lines(b_buf, 1, 2, false, { full_line })
         else
-            -- If window is too small, just put one space
-            api.nvim_buf_set_lines(b_buf, 1, 2, false, { left_text .. " " .. right_text })
+          -- If window is too small, just put one space
+          api.nvim_buf_set_lines(b_buf, 1, 2, false, { left_text .. ' ' .. right_text })
         end
       end
 
       -- api.nvim_win_set_option(r_ovr_win, 'winhl', 'Normal:' .. state.hl_overlay_active)
       -- else
       -- api.nvim_win_set_option(r_ovr_win, 'winhl', 'Normal:' .. state.hl_overlay_active)
+    else
+      -- CRITICAL FIX: Clear the cell cursor highlights when the window is inactive
+      api.nvim_buf_clear_namespace(r_ovr_buf, state.ns, 0, -1)
+      -- You might need to re-apply the basic row highlighting if that's in state.ns
+      apply_table_highlights(r_ovr_buf)
     end
   end
 
@@ -634,35 +695,35 @@ local function update_ui_state()
   end
 
   -- bottom buffer text highlighting
-  local ns = api.nvim_create_namespace("my_dynamic_highlights")
-    
+  local ns = api.nvim_create_namespace 'my_dynamic_highlights'
+
   -- Clear previous highlights in this namespace
   api.nvim_buf_clear_namespace(b_buf, ns, 0, -1)
 
   local lines = api.nvim_buf_get_lines(b_buf, 0, -1, false)
   for i, line in ipairs(lines) do
-      local line_idx = i - 1
+    local line_idx = i - 1
 
-      -- Patterns to match: Label (Soft Red)
-      local labels = { "Connect:", "New:", "Edit:", "Leader:", "Refresh:", "Help:", "Delete:", "Execute:", "History:", "Close:", "Insert Mode:", "Normal Mode:" }
-      for _, word in ipairs(labels) do
-          local s, e = line:find(word)
-          if s then
-              api.nvim_buf_add_highlight(b_buf, ns, "SoftRedLabel", line_idx, s-1, e)
-          end
-      end
-
-      -- Patterns to match: Keys (Soft Orange)
-      -- Uses lua patterns to find <...> or single letters after a colon
-      local orange_patterns = { "<enter>", " n ", "<space>", "?", " e ", " f ", " d ", " i ", " h ", "<esc>" }
-      for _, pat in ipairs(orange_patterns) do
-          local s, e = line:find(pat)
-          if s then
-              -- Adjust start/end if you included spaces in the pattern to match precisely
-              api.nvim_buf_add_highlight(b_buf, ns, "SoftOrangeKey", line_idx, s-1, e)
-          end
+    -- Patterns to match: Label (Soft Red)
+    local labels = { 'Connect:', 'New:', 'Edit:', 'Leader:', 'Refresh:', 'Help:', 'Delete:', 'Execute:', 'History:', 'Close:', 'Insert Mode:', 'Normal Mode:' }
+    for _, word in ipairs(labels) do
+      local s, e = line:find(word)
+      if s then
+        api.nvim_buf_add_highlight(b_buf, ns, 'SoftRedLabel', line_idx, s - 1, e)
       end
     end
+
+    -- Patterns to match: Keys (Soft Orange)
+    -- Uses lua patterns to find <...> or single letters after a colon
+    local orange_patterns = { '<enter>', ' n ', '<space>', '?', ' e ', ' f ', ' d ', ' i ', ' h ', '<esc>' }
+    for _, pat in ipairs(orange_patterns) do
+      local s, e = line:find(pat)
+      if s then
+        -- Adjust start/end if you included spaces in the pattern to match precisely
+        api.nvim_buf_add_highlight(b_buf, ns, 'SoftOrangeKey', line_idx, s - 1, e)
+      end
+    end
+  end
 end
 
 M.close_all_windows = function()
@@ -688,18 +749,41 @@ local function switch_to_win(target)
   end
 end
 
--- Add a function you can call externally when a connection is made
--- M.connect_db = function ()
-local connect_db = function(ovr_buf)
-  -- Set default open states
-  state.open_nodes = { ['MyLocalDB'] = true, ['Tables'] = false, ['Views'] = false, ['Indexes'] = false, ['Triggers'] = false }
-  -- (You would also fetch real schema data here)
-  render_explorer_tree(ovr_buf)
-  -- Optional: switch focus automatically after connection
-  switch_to_win 'overlay'
-end
-
 M.open_db_float = function()
+  -- Use this line instead
+  local db = require 'sqlite.db'
+
+  -- Now 'db' should not be nil, and db:open will work:
+  local conn, err = db:open '/home/yuito/Blue Book/database.db'
+
+  if not conn then
+    print('Error opening database: ' .. tostring(err))
+    return
+  end
+
+  -- Use 'conn' for operations
+  local schema = conn:eval [[
+    SELECT name, type FROM sqlite_schema 
+    WHERE type IN ('table', 'view', 'trigger') AND name NOT LIKE 'sqlite_%' 
+    ORDER BY type, name;
+  ]]
+
+  print(vim.inspect(schema))
+  db:close()
+
+  local users = db.with_open('/home/yuito/Blue Book/database.db', function(conn)
+    -- 'conn' is valid ONLY inside this function block
+    local result = conn:eval 'SELECT * FROM users'
+    return result
+  end)
+
+  print(vim.inspect(users))
+
+  -- Example of iterating through the users table:
+  for _, user_row in ipairs(users) do
+    print('User Email: ' .. user_row.email .. ', Name: ' .. user_row.name)
+  end
+
   setup_highlight_groups()
   local ui = api.nvim_list_uis()[1]
   local w, h = math.floor(ui.width * 1), math.floor(ui.height * 0.9)
@@ -774,6 +858,7 @@ M.open_db_float = function()
     zindex = 110,
   })
   state.wins[q_ovr_win] = 'q_overlay'
+  api.nvim_buf_set_option(q_ovr_buf, 'buftype', 'nofile')
 
   --api.nvim_win_set_option(q_ovr_win, 'number', true) -- FIXME: bug the numberings are getting reversed
   --api.nvim_win_set_option(q_ovr_win, 'relativenumber', true)
@@ -865,11 +950,8 @@ M.open_db_float = function()
         switch_to_win 'results'
       end, { buffer = b })
       vim.keymap.set('n', '<Esc>', M.close_all_windows, { buffer = b })
-      map(ovr_buf, 'n', '<CR>', [[<cmd>lua require'db.ui'.toggle_node()<CR>]])
       if name == 'overlay' then
-        vim.keymap.set('n', 't', function()
-          connect_db(ovr_buf)
-        end, { buffer = b })
+        map(ovr_buf, 'n', '<CR>', [[<cmd>lua require'db.ui'.toggle_node()<CR>]])
       end
       if name == 'query' then
         vim.keymap.set('i', '<Tab>', function()
